@@ -24,54 +24,74 @@ esp_err_t CAN_init(CAN_Data_handler *car_settings, twai_timing_config_t *t_confi
 
     twai_start();
     for (uint8_t i = 0; i < 2; i++) {
-       if (twai_driver_install(general_config, t_config, &(filter_config[i])) != ESP_OK) {
+
+       if (twai_driver_install(general_config, t_config, &filter_config[i]) != ESP_OK) {
         ESP_LOGE("CAN_init", "Failed to install TWAI driver.");
         return ESP_FAIL;
          }
         else { 
-             if (twai_reconfigure_alerts(alerts_to_enable, NULL) == ESP_OK) {
+            if (twai_reconfigure_alerts(alerts_to_enable, NULL) == ESP_OK) {
         ESP_LOGI("CAN_init(alert reconfig)", "Alerts reconfigured");
-    } else {
+            } else {
         ESP_LOGE("CAN_init(alert reconfig)", "Failed to reconfigure alerts");
         return ESP_FAIL;
-    }
+        }
              twai_start();
         }
-         if (twai_transmit(&(car_settings->sender_node), pdMS_TO_TICKS(1000)) == ESP_OK) {
-              if(twai_read_alerts(&alerts, pdMS_TO_TICKS(1000)) == ESP_OK) {
+         
+            if (twai_transmit(&(car_settings->sender_node), pdMS_TO_TICKS(1000)) == ESP_OK) {
+                int res = twai_read_alerts(&alerts, pdMS_TO_TICKS(2000));
+                if(res == ESP_OK) {
                    if (alerts & TWAI_ALERT_TX_SUCCESS) {
-                     ESP_LOGI("CAN_init", "Message sent successfully");
-                         if (twai_receive(&(car_settings->receiver_node), pdMS_TO_TICKS(1000)) == ESP_OK) {
+                         ESP_LOGI("CAN_init", "Message sent successfully");
+                        if ((twai_receive(&(car_settings->receiver_node), pdMS_TO_TICKS(1000)) == ESP_OK) && (car_settings->receiver_node.data[3] == 0x00)) {
                                ESP_LOGI("CAN_init", "Message received successfully");
                                break;
-                      } else if (i == 0)  {
-                    ESP_LOGE("CAN_init", "Failed to receive message, TRYING 11bit ID");
-                    if (twai_stop() == ESP_OK) {
-                        twai_driver_uninstall();
-                        car_settings->sender_node = (twai_message_t){CAN_PID_SENSOR_SETUP_EXT};
-                    }                       
-                     } else {
-                        ESP_LOGE("CAN_init", "Failed to receive on both attempts, stopping TWAI driver");
-                        if (twai_stop() == ESP_OK) {
-                            twai_driver_uninstall();
-                            return ESP_FAIL;  // Return failure if unable to receive any message
                         }
-                     }
-            } else if (alerts & TWAI_ALERT_TX_FAILED) {
-                ESP_LOGE("CAN_init", "Message transmission failed");
+                        else if (i == 0)  {
+                            ESP_LOGE("CAN_init", "Failed to receive message, TRYING 11bit ID");
+                            if (twai_stop() == ESP_OK) {
+                                twai_driver_uninstall();
+                                car_settings->sender_node = (twai_message_t){CAN_PID_SENSOR_SETUP_EXT};
+                            }
+                        }             
+                        else {
+                            ESP_LOGE("CAN_init", "Failed to receive on both attempts, stopping TWAI driver");
+                            if (twai_stop() == ESP_OK) {
+                                twai_driver_uninstall();
+                                return ESP_FAIL;  // Return failure if unable to receive any message
+                            } 
+                        }    
+                   }   
+                    else {
+                        ESP_LOGE("CAN_init", "Message transmission failed");
+                        return ESP_FAIL;
+                    }
+                }
+            
+                else if ((res == ESP_ERR_TIMEOUT) && (i == 0)) {
+                  ESP_LOGE("CAN_init", "Timeout while sending message, TRYING 11bit ID");
+                  return ESP_FAIL;
+                } 
+                
+                else if (res == ESP_ERR_TIMEOUT) {
+                    ESP_LOGE("CAN_init", "Timeout while sending message on both attempts");
+                    return ESP_FAIL;  // Return failure if unable to send message
+                }
+
+
+                
+            }
+            else {
+                ESP_LOGE("CAN_init", "Failed to qeue message");
                 return ESP_FAIL;
             }
-        } else {
-            ESP_LOGE("CAN_init", "Failed to read alerts");
-            return ESP_FAIL;
-        }
     }
-    else {
-        ESP_LOGE("CAN_init", "Failed to qeue message");
-        return ESP_FAIL;
-    }
+        
+    
 
-}
+
+
 car_settings->is_extended = car_settings->sender_node.extd; // Set the is_extended flag based on the message format
 return ESP_OK;
 }
