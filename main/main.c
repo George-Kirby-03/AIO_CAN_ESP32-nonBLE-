@@ -23,5 +23,12 @@ CAN_Data_handler car_settings;
 
 void app_main(void)
 {
+    PID_data **pid_list = NULL;
+    PID_data test[] ={
+        { .f_data = 0x00, .PID_index = 2, .gen_func = NULL, .is_available = 1 },
+        { .f_data = 0x01, .PID_index = 33, .gen_func = NULL, .is_available = 1 },
+        // Add more PIDs as needed
+    };
     CAN_init(&car_settings, &t_config, can_pid_filters, &pid_general_config);
+    PID_data_init(test, &pid_list, &car_settings);
 }
