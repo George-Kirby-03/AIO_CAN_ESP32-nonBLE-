@@ -11,7 +11,9 @@
     "IDF_TARGET": "esp32"
   },
   "files.associations": {
-    "twai.h": "c"
+    "twai.h": "c",
+    "cstdint": "c",
+    "functional": "c"
   },
   "idf.flashType": "UART"
 }

@@ -1,6 +1,8 @@
 #include <canPID.h>
 #include <common.h>
 
+static uint8_t pid_list_count = 0; // Initialize the count of PIDs in the list
+
 esp_err_t CAN_request(CAN_Data_handler *car_settings, uint8_t *data_send, uint8_t *data_expected, uint8_t mask_size, uint64_t mask, TickType_t timeout) {
     
     memcpy(car_settings->sender_node.data, data_send, 8); // Copy the request data into the sender node
@@ -30,6 +32,35 @@ esp_err_t CAN_request(CAN_Data_handler *car_settings, uint8_t *data_send, uint8_
             return ESP_OK;
         } else {
             ESP_LOGW("PID_data_init", "Received data doesn't match expected mask.");
+        }
+    }
+
+    return ESP_ERR_TIMEOUT;  // Timeout if no valid response
+}
+
+esp_err_t CAN_request_pid(CAN_Data_handler *car_settings, PID_data *element, TickType_t timeout) {
+    
+    memcpy(car_settings->sender_node.data, CAN_PID_REQUEST(element->PID_index), 8); // Copy the request data into the sender node
+
+    if (twai_transmit(&(car_settings->sender_node), pdMS_TO_TICKS(1000)) != ESP_OK) {
+        ESP_LOGE("PID_data_init", "Failed to transmit initial message.");
+        return ESP_FAIL;
+    }
+
+    TickType_t startTick = xTaskGetTickCount();
+    while (xTaskGetTickCount() - startTick < pdMS_TO_TICKS(timeout)) {
+
+        if (twai_receive(&(car_settings->receiver_node), pdMS_TO_TICKS(1000)) != ESP_OK) {
+            ESP_LOGE("PID_data_init", "Failed to receive initial message.");
+            return ESP_FAIL;
+        }
+
+        // Compare received data with expected data using the mask
+        uint64_t actual = 0, expected = 0;
+        if (element->PID_index == car_settings->receiver_node.data[2]) {
+            return ESP_OK;  // Return early if the PID index matches
+        } else {
+            ESP_LOGW("PID_data_init", "Received PID index does not match expected PID index.");
         }
     }
 
@@ -132,7 +163,7 @@ ESP_LOGI("CAN_init", "YAYYY, CAN bus initialized successfully with %s frame form
 return ESP_OK;
 }
 
-esp_err_t PID_data_init(PID_data *programed_pids, PID_data ***pid_list, CAN_Data_handler *car_settings)
+esp_err_t PID_data_init(PID_data *programed_pids, PID_data ***pid_list, uint8_t *list_size, CAN_Data_handler *car_settings)
 {
 
 
@@ -144,28 +175,36 @@ esp_err_t PID_data_init(PID_data *programed_pids, PID_data ***pid_list, CAN_Data
     }
 
     uint32_t pid_count = 0;
-    for (uint8_t i = 0; i < car_settings->sender_node.data[0] - 2; i++) {
-        pid_count = pid_count << 8;  // Shift left to make space for the next PID
-        pid_count |= car_settings->sender_node.data[i + 2];  // Combine the PID bytes into a single value
+    uint8_t pid_bytes = car_settings->receiver_node.data[0] - 2;  // Get the number of PID bytes from the response
+    ESP_LOGI("PID_data_init", "data[0]: %02X", car_settings->receiver_node.data[0]);
+    for (uint8_t i = 0; i < car_settings->receiver_node.data[0] - 2; i++) {
+         ESP_LOGI("PID_data_init", "Loop %d", i);
+        pid_count |= car_settings->receiver_node.data[i + 3] << (24 - (i * 8));  // Combine the PID bytes into a single value
+        
     }
-    ESP_LOGI("PID_data_init", "Found %lu PIDs", pid_count);
+    
 
     uint8_t pid_count_alt = __builtin_popcount(pid_count);  // Count the number of set bits in pid_count
     *pid_list = malloc(pid_count_alt * sizeof(PID_data*));  // Allocate memory for the list of PID_data pointers
+    ESP_LOGI("PID_data_init", "Found %d PIDs", pid_count_alt);
+    *list_size = pid_count_alt; 
 
+    ESP_LOGI("PID_data_init", "Hex of %08lX", pid_count);
    uint8_t index = 0;
-   for (uint8_t i = 0; i < sizeof(pid_count); i++) {
-        if (pid_count & (1 << i)) {
+   for (uint8_t i = 0; i < pid_bytes*8; i++) {
+    ESP_LOGI("PID_data_init", "Iterating bits (%d)", i);
+        if (pid_count & (1 << (31 - i))) {
             uint8_t list_inc = 0;
             while(1){
-                 if (programed_pids[list_inc].gen_func == NULL) {
+                 if (programed_pids[list_inc].f_gen_func == NULL && programed_pids[list_inc].i_gen_func == NULL) {
                  ESP_LOGE("PID_data_init", "PID has no gen_func, stopping set PIDS");
                  (*pid_list)[index] = malloc(sizeof(PID_data));
-                 *((*pid_list)[index]) = (PID_data){CAN_PID_EMPTY_PID(i)};  // Set the PID index
+                 *((*pid_list)[index]) = (PID_data){CAN_PID_EMPTY_PID(i+1)};  // Set the PID index
                  break;
                   }
-                  else if (programed_pids[list_inc].PID_index == i) {
+                  else if (programed_pids[list_inc].PID_index == i+1) {
                     (*pid_list)[index] = &programed_pids[list_inc];  // Point to the existing PID_data
+                    ESP_LOGI("PID_data_init", "FOUND PID %d, setting gen_func", i+1);
                   break;
                   }
                   else {
@@ -177,4 +216,73 @@ esp_err_t PID_data_init(PID_data *programed_pids, PID_data ***pid_list, CAN_Data
     }
 
     return ESP_OK;
+}
+
+esp_err_t CAN_loop(CAN_Data_handler *car_settings, PID_data ***pid_list, uint8_t pid_list_count) {
+    if (car_settings == NULL || pid_list == NULL || pid_list_count == 0) {
+        ESP_LOGE("CAN_loop", "Invalid parameters: car_settings or pid_list is NULL.");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (uint8_t i = 0; i < pid_list_count; i++) {
+        // Request the PID data
+        if (CAN_request_pid(car_settings, ((*pid_list)[i]), pdMS_TO_TICKS(3000)) != ESP_OK) {
+            ESP_LOGE("CAN_loop", "Failed to request PID %d data.", (*pid_list)[i]->PID_index);
+            (*pid_list)[i]->f_data = 3.0f;
+            continue;  // Skip to the next PID if the request fails
+        }
+        else{
+            ESP_LOGI("CAN_loop", "Successfully requested PID %d data.", (*pid_list)[i]->PID_index);
+        if ((*pid_list)[i]->f_gen_func != NULL || (*pid_list)[i]->i_gen_func != NULL) {
+            switch ((*pid_list)[i]->is_float)
+            {
+            case 0:
+                (*pid_list)[i]->i_data = (uint8_t)((*pid_list)[i]->i_gen_func)(car_settings->receiver_node.data);
+                break;
+            
+            default:
+                (*pid_list)[i]->f_data = ((*pid_list)[i]->f_gen_func)(car_settings->receiver_node.data);
+                break;
+            }
+        }
+        else {
+            for (uint8_t j = 0; j < car_settings->receiver_node.data[0]-2 ; j++) {
+                (*pid_list)[i]->f_data += car_settings->receiver_node.data[j + 3];  // Copy the data directly if no gen_func is defined
+            }
+            
+        }
+    }
+}
+    return ESP_OK;  
+}
+
+esp_err_t CAN_print_all_pids(PID_data ***pid_list, uint8_t pid_list_count){
+     if (pid_list == NULL || pid_list_count == 0) {
+        ESP_LOGE("CAN_loop", "Invalid parameters: car_settings or pid_list is NULL.");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    PID_data *pid = NULL;  // Initialize a pointer to hold the current PID_data
+    for(uint8_t i = 0; i < pid_list_count; i++) {
+     pid = (*pid_list)[i];
+if (pid == NULL) {
+    ESP_LOGE("CAN_print_all_pids", "PID_data[%p] is NULL", pid);
+    return ESP_ERR_INVALID_ARG;  // Return error if PID_data pointer is NULL
+}
+        // ESP_LOGI("CAN_print_all_pids", "pid_list[%d] = %p", i, (*pid_list)[i]);
+        if (pid->f_gen_func == NULL && pid->i_gen_func == NULL) {
+           printf("PID %d: %f (has NOT been converted) \n", pid->PID_index, pid->f_data);
+            continue;  // Skip if the PID_data pointer is NULL
+        }
+        else {
+            
+        if (pid->is_float == 1) {
+            printf("(CAN_print_all_pids) PID %d: %f (has been converted) \n", pid->PID_index, pid->f_data);
+        } else {
+            // printf("CAN_print_all_pids PID %d: %d (has been converted)", (*pid_list[i])->PID_index, (*pid_list[i])->i_data);
+            printf("(CAN_print_all_pids) PID %d: %d (has been converted) \n", pid->PID_index, pid->i_data);
+        }
+    }
+    }
+    return ESP_OK;  // Return success after printing all PIDs
 }
